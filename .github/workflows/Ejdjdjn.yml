@@ -47,19 +47,47 @@ jobs:
           echo "=== [STEP 3/4] Connecting Tailscale ==="
           curl -fsSL https://tailscale.com/install.sh | sh
           
-          sudo tailscale up \
-            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
-            --hostname="win10-qemu-runner-${{ github.run_id }}" \
-            --accept-routes || true
+          AUTH_KEY="${{ secrets.TAILSCALE_AUTHKEY }}"
           
-          TS_IP=""
-          RETRIES=0
-          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
-              TS_IP=$(tailscale ip -4 || true)
-              sleep 3
-              RETRIES=$((RETRIES+1))
-          done
-          
+          if [ -n "$AUTH_KEY" ]; then
+            echo "Attempting auto-login with TAILSCALE_AUTHKEY..."
+            sudo tailscale up --authkey="$AUTH_KEY" --hostname="win10-qemu-runner-${{ github.run_id }}" --accept-routes || true
+          fi
+
+          TS_IP=$(tailscale ip -4 || true)
+          if [ -z "$TS_IP" ]; then
+            echo "=================================================="
+            echo " ATTENTION: PLEASE VERIFY RUNNER IN TAILSCALE"
+            echo " Open the link below in your browser to approve:"
+            echo "=================================================="
+            
+            sudo tailscale up --hostname="win10-qemu-runner-${{ github.run_id }}" --accept-routes > /tmp/tailscale_auth.log 2>&1 &
+            
+            for i in {1..15}; do
+              if grep -q "https://tailscale.com/a/" /tmp/tailscale_auth.log; then
+                cat /tmp/tailscale_auth.log
+                break
+              fi
+              sleep 2
+            done
+            
+            RETRIES=0
+            while [ -z "$TS_IP" ] && [ $RETRIES -lt 60 ]; do
+                TS_IP=$(tailscale ip -4 || true)
+                sleep 3
+                RETRIES=$((RETRIES+1))
+            done
+          fi
+
+          if [ -z "$TS_IP" ]; then
+            echo "ERROR: Tailscale authentication failed or timed out!"
+            exit 1
+          fi
+
+          echo "=================================================="
+          echo " Tailscale Successfully Connected!"
+          echo " Tailscale IP: $TS_IP"
+          echo "=================================================="
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
       - name: 4. Launch QEMU Windows 10 & noVNC Web Access
@@ -68,7 +96,7 @@ jobs:
           
           export QEMU_AUDIO_DRV=none
 
-          # Запуск QEMU: Intel Core i3-10100F (4 ядра / 4 потока), 16 GB RAM, OVMF UEFI, Intel HDA Sound
+          # Запуск QEMU: Intel Core i3-10100F (4 ядра), 16 GB RAM, OVMF UEFI, Intel HDA Sound
           qemu-system-x86_64 \
             -enable-kvm \
             -m 16384 \
@@ -116,3 +144,4 @@ jobs:
             sleep 300
             echo "QEMU Running | Tailscale IP: $TAILSCALE_IP | $(date)"
           done
+
