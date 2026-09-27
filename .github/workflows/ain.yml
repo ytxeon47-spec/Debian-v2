@@ -1,0 +1,160 @@
+name: Custom Debian 12 QEMU (16GB RAM, 4 Cores, NVIDIA GPU & Auto-Install)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-debian12-qemu:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Install QEMU, KVM & Storage Tools
+        run: |
+          echo "=== [STEP 1/4] Installing QEMU, KVM, Mesa & ISO Tools ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 \
+            qemu-utils \
+            novnc \
+            websockify \
+            curl \
+            wget \
+            aria2 \
+            genisoimage \
+            libgl1-mesa-dri \
+            libvirglrenderer1
+
+          echo "=== Enabling KVM Permissions ==="
+          sudo chmod 666 /dev/kvm || true
+
+          echo "=== Creating Main Virtual Disk (128GB qcow2) ==="
+          qemu-img create -f qcow2 /tmp/main_disk.qcow2 128G
+
+      - name: 2. Download Debian 12 ISO & Prepare Preseed Auto-Install
+        run: |
+          echo "=== [STEP 2/4] Downloading Debian 12 ISO & Generating Preseed ==="
+          
+          ISO_URL="https://archive.org/download/debian-Archive/debian-12.1.0-amd64-DVD-1.iso"
+          
+          echo "Downloading ISO to /tmp/debian12.iso..."
+          aria2c -x 16 -s 16 -k 1M -d /tmp -o debian12.iso "$ISO_URL" || wget -O /tmp/debian12.iso "$ISO_URL"
+          
+          ls -lh /tmp/debian12.iso
+
+          # Создаем файл конфигурации автоустановки (preseed.cfg)
+          mkdir -p /tmp/auto_install
+          cat << 'EOF' > /tmp/auto_install/preseed.cfg
+          d-i debian-installer/locale string ru_RU.UTF-8
+          d-i keyboard-configuration/xkb-keymap select ru
+          d-i netcfg/choose_interface select auto
+          d-i netcfg/get_hostname string debian-qemu
+          d-i netcfg/get_domain string local
+          
+          d-i mirror/country string manual
+          d-i mirror/http/hostname string deb.debian.org
+          d-i mirror/http/directory string /debian
+          d-i mirror/http/proxy string ""
+          
+          d-i passwd/root-login boolean true
+          d-i passwd/root-password password root
+          d-i passwd/root-password-again password root
+          d-i passwd/user-fullname string User
+          d-i passwd/username string user
+          d-i passwd/user-password password user
+          d-i passwd/user-password-again password user
+          
+          d-i clock-setup/utc boolean true
+          d-i time/zone string Europe/Zaporozhye
+          d-i partman-auto/method string regular
+          d-i partman-auto/choose_recipe select atomic
+          d-i partman/confirm_write_new_label boolean true
+          d-i partman/choose_partition select finish
+          d-i partman/confirm boolean true
+          d-i partman/confirm_nooverwrite boolean true
+          
+          tasksel tasksel/first multiselect desktop, gnome, ssh-server
+          d-i pkgsel/include string build-essential mesa-utils virgl-drivers xorg nvidia-detect
+          d-i pkgsel/upgrade select full-upgrade
+          d-i grub-installer/only_debian boolean true
+          d-i grub-installer/with_other_os boolean true
+          d-i finish-install/reboot_in_progress note
+          EOF
+
+          echo "Packaging Auto-Install ISO..."
+          genisoimage -V "OEM_CONFIG" -J -R -o /tmp/auto_install.iso /tmp/auto_install
+
+      - name: 3. Connect Tailscale
+        run: |
+          echo "=== [STEP 3/4] Connecting Tailscale ==="
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          sudo tailscale up \
+            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
+            --hostname="debian12-qemu-runner-${{ github.run_id }}" \
+            --accept-routes || true
+          
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+              TS_IP=$(tailscale ip -4 || true)
+              sleep 3
+              RETRIES=$((RETRIES+1))
+          done
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: 4. Launch QEMU Debian 12 & noVNC Web Access
+        run: |
+          echo "=== [STEP 4/4] Starting QEMU Debian 12 Machine ==="
+          
+          # Запуск QEMU: 16 GB RAM, 4 Cores, 128 GB Disk, VirGL 3D Acceleration + NVIDIA GTX 1060 PCI Vendor Identity
+          qemu-system-x86_64 \
+            -enable-kvm \
+            -m 16384 \
+            -smp 4,sockets=1,cores=4,threads=1 \
+            -cpu host \
+            -drive file=/tmp/main_disk.qcow2,format=qcow2,index=0,media=disk \
+            -drive file=/tmp/debian12.iso,index=1,media=cdrom \
+            -drive file=/tmp/auto_install.iso,index=2,media=cdrom \
+            -vga std \
+            -device virtio-vga,virgl=on,vendor=0x10de,device=0x1c02 \
+            -boot d \
+            -vnc 127.0.0.1:0 \
+            -net nic,model=e1000 \
+            -net user \
+            -usb -device usb-tablet \
+            -daemonize
+
+          sleep 5
+
+          # Настройка noVNC
+          NOVNC_DIR="/usr/share/novnc"
+          if [ -d "/usr/share/novnc/vnc_lite.html" ] || [ -f "/usr/share/novnc/vnc.html" ] || [ -f "/usr/share/novnc/index.html" ]; then
+            NOVNC_DIR="/usr/share/novnc"
+          elif [ -d "/usr/share/novnc" ]; then
+            NOVNC_DIR="/usr/share/novnc"
+          fi
+
+          websockify --web "$NOVNC_DIR" 8006 127.0.0.1:5900 &
+          sleep 2
+
+          echo "=================================================="
+          echo " DEBIAN 12 QEMU READY"
+          echo "=================================================="
+          echo " OS Image     : Debian 12.1.0 DVD (amd64)"
+          echo " CPU Cores    : 4 Cores (Host Passthrough)"
+          echo " RAM          : 16 GB (16384 MB)"
+          echo " Storage Size : 128 GB Main Disk"
+          echo " GPU          : NVIDIA GeForce GTX 1060 Emulation + VirGL 3D"
+          echo " Auto-Install : Preseed Config Loaded"
+          echo " Tailscale IP : $TAILSCALE_IP"
+          echo " Web VNC URL  : http://$TAILSCALE_IP:8006/vnc.html"
+          echo "=================================================="
+
+          # Удерживаем раннер 6 часов
+          END_TIME=$(( $(date +%s) + 21600 ))
+          while [ $(date +%s) -lt $END_TIME ]; do
+            sleep 300
+            echo "QEMU Running | Tailscale IP: $TAILSCALE_IP | $(date)"
+          done
