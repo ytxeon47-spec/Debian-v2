@@ -39,7 +39,7 @@ jobs:
           ISO_URL="https://archive.org/download/en_windows_10_enterprise_g/en_windows_10_enterprise_g_22h2_build_19045.3570.iso"
           
           echo "Downloading ISO to /tmp/win10.iso..."
-          aria2c -x 16 -s 16 -k 1M -d /tmp -o win10.iso "$ISO_URL" || wget -O /tmp/win10.iso "$ISO_URL"
+          aria2c -x 4 -s 4 -k 1M -d /tmp -o win10.iso "$ISO_URL" || wget -O /tmp/win10.iso "$ISO_URL"
           
           ls -lh /tmp/win10.iso
 
@@ -49,21 +49,21 @@ jobs:
           
           mkdir -p /tmp/win_extras
           
-          # Прямые проверенные зеркала компонентов
-          DIRECTX_URL="https://archive.org/download/directx_20106/directx_Jun2010_redist.exe"
+          # Официальные прямые ссылки без блокировок и 503 ошибок
+          DIRECTX_URL="https://download.microsoft.com/download/1/7/1/171017D0-F9B0-4653-A814-2ED9E1110270/directx_Jun2010_redist.exe"
           VCREDIST_URL="https://github.com/abbodi1406/vcredist/releases/download/v0.80.0/VisualCppRedist_AIO_x86_x64.zip"
           MESA3D_URL="https://github.com/pal1000/mesa-dist-win/releases/download/21.3.9/mesa3d-21.3.9-release-msvc.exe"
           
-          echo "Downloading DirectX 9.0c Full Redistributable..."
-          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o directx_redist.exe "$DIRECTX_URL" || wget -O /tmp/win_extras/directx_redist.exe "$DIRECTX_URL"
+          echo "Downloading DirectX 9.0c Full Redistributable from Microsoft..."
+          wget --tries=5 --timeout=30 -O /tmp/win_extras/directx_redist.exe "$DIRECTX_URL"
           
-          echo "Downloading VC++ Runtimes (All-in-One 2005-2022)..."
-          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o vcredist.zip "$VCREDIST_URL" || wget -O /tmp/win_extras/vcredist.zip "$VCREDIST_URL"
+          echo "Downloading VC++ Runtimes (All-in-One 2005-2022) from GitHub..."
+          wget --tries=5 --timeout=30 -O /tmp/win_extras/vcredist.zip "$VCREDIST_URL"
 
-          echo "Downloading Mesa3D OpenGL Driver Pack..."
-          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o mesa3d_setup.exe "$MESA3D_URL" || wget -O /tmp/win_extras/mesa3d_setup.exe "$MESA3D_URL"
+          echo "Downloading Mesa3D OpenGL Driver Pack from GitHub..."
+          wget --tries=5 --timeout=30 -O /tmp/win_extras/mesa3d_setup.exe "$MESA3D_URL" || true
 
-          # Автоматический скрипт тихой установки
+          # Автоматический скрипт установки
           cat << 'EOF' > /tmp/win_extras/autorun_install.bat
           @echo off
           echo Unpacking and Installing DirectX 9.0c...
@@ -108,7 +108,6 @@ jobs:
         run: |
           echo "=== [STEP 5/5] Starting QEMU Windows 10 Machine ==="
           
-          # Запуск QEMU: Intel Core i7-10700K (8 ядер / 16 потоков), 16 GB RAM, Legacy BIOS
           qemu-system-x86_64 \
             -enable-kvm \
             -m 16384 \
@@ -141,10 +140,9 @@ jobs:
           echo " WINDOWS 10 QEMU READY (SOURCE ENGINE PRE-LOADED)"
           echo "=================================================="
           echo " OS Image     : Windows 10 Enterprise G (22H2)"
-          echo " CPU Model    : Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz (8 Cores / 16 Threads)"
+          echo " CPU Model    : Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz"
           echo " RAM          : 16 GB (16384 MB)"
-          echo " Firmware     : Standard Legacy BIOS (No UEFI)"
-          echo " Extras Drive : Auto-Mount CDROM (DirectX 9.0c + VC++ Runtimes)"
+          echo " Extras Drive : DirectX 9.0c (Microsoft Official Direct Link) + VC++"
           echo " Tailscale IP : $TAILSCALE_IP"
           echo " Web VNC URL  : http://$TAILSCALE_IP:8006/vnc.html"
           echo "=================================================="
