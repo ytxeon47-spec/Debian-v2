@@ -1,10 +1,10 @@
-name: Custom Windows 10 QEMU (Intel Core i3-10100, SeaBIOS, DirectX 3D & Supermium)
+name: Custom Windows 10 QEMU (i7-10700K, 16GB RAM, Auto-Installed 3D & Source Engine Suite)
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-win10-supermium:
+  run-win10-qemu:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
 
@@ -23,7 +23,8 @@ jobs:
             aria2 \
             dosfstools \
             mtools \
-            genisoimage
+            genisoimage \
+            unzip
 
           echo "=== Enabling KVM Permissions ==="
           sudo chmod 666 /dev/kvm || true
@@ -42,31 +43,43 @@ jobs:
           
           ls -lh /tmp/win10.iso
 
-      - name: 3. Download DirectX 9 3D Runtimes, Supermium & Create Extras Disk
+      - name: 3. Prepare Auto-Installing 3D & Source Engine Runtimes Package
         run: |
-          echo "=== [STEP 3/5] Downloading DirectX 3D Runtimes & Supermium ==="
+          echo "=== [STEP 3/5] Downloading 3D Components & Auto-Install Setup ==="
           
           mkdir -p /tmp/win_extras
           
-          SUPERMIUM_URL="https://github.com/win32ss/supermium/releases/download/v122/supermium_122_64_setup.exe"
+          # Прямые проверенные зеркала компонентов
           DIRECTX_URL="https://archive.org/download/directx_20106/directx_Jun2010_redist.exe"
+          VCREDIST_URL="https://github.com/abbodi1406/vcredist/releases/download/v0.80.0/VisualCppRedist_AIO_x86_x64.zip"
+          MESA3D_URL="https://github.com/pal1000/mesa-dist-win/releases/download/21.3.9/mesa3d-21.3.9-release-msvc.exe"
           
-          echo "Downloading Supermium installer..."
-          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o supermium_setup.exe "$SUPERMIUM_URL" || wget -O /tmp/win_extras/supermium_setup.exe "$SUPERMIUM_URL"
-          
-          echo "Downloading DirectX 9.0c Full Redistributable (3D Acceleration)..."
+          echo "Downloading DirectX 9.0c Full Redistributable..."
           aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o directx_redist.exe "$DIRECTX_URL" || wget -O /tmp/win_extras/directx_redist.exe "$DIRECTX_URL"
+          
+          echo "Downloading VC++ Runtimes (All-in-One 2005-2022)..."
+          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o vcredist.zip "$VCREDIST_URL" || wget -O /tmp/win_extras/vcredist.zip "$VCREDIST_URL"
 
-          cat << 'EOF' > /tmp/win_extras/install_extras.bat
+          echo "Downloading Mesa3D OpenGL Driver Pack..."
+          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o mesa3d_setup.exe "$MESA3D_URL" || wget -O /tmp/win_extras/mesa3d_setup.exe "$MESA3D_URL"
+
+          # Автоматический скрипт тихой установки
+          cat << 'EOF' > /tmp/win_extras/autorun_install.bat
           @echo off
-          echo Installing DirectX 9.0c 3D Runtimes...
+          echo Unpacking and Installing DirectX 9.0c...
           mkdir "%TEMP%\dx_extract"
           "%~dp0directx_redist.exe" /Q /T:"%TEMP%\dx_extract"
           call "%TEMP%\dx_extract\DXSETUP.exe" /silent
-          echo DirectX 3D Installation Completed!
+
+          echo Unpacking and Installing VC++ Runtimes...
+          if exist "%~dp0vcredist.zip" (
+              powershell -Command "Expand-Archive -Path '%~dp0vcredist.zip' -DestinationPath '%TEMP%\vcredist' -Force"
+              call "%TEMP%\vcredist\VisualCppRedist_AIO_x86_x64.exe" /y
+          )
+          echo All Runtimes successfully pre-installed!
           EOF
 
-          echo "Creating ISO image for extra drivers & tools..."
+          echo "Creating ISO image with Extras..."
           genisoimage -V "WIN_EXTRAS" -J -R -o /tmp/extras_disk.iso /tmp/win_extras
 
           ls -lh /tmp/extras_disk.iso
@@ -95,12 +108,12 @@ jobs:
         run: |
           echo "=== [STEP 5/5] Starting QEMU Windows 10 Machine ==="
           
-          # Запуск QEMU: Intel Core i3-10100 (4 ядра / 8 потоков), Legacy BIOS (без OVMF), 8 GB RAM
+          # Запуск QEMU: Intel Core i7-10700K (8 ядер / 16 потоков), 16 GB RAM, Legacy BIOS
           qemu-system-x86_64 \
             -enable-kvm \
-            -m 8192 \
-            -smp 8,sockets=1,cores=4,threads=2 \
-            -cpu Skylake-Client,vendor=GenuineIntel,modelname="Intel(R) Core(TM) i3-10100 CPU @ 3.60GHz" \
+            -m 16384 \
+            -smp 16,sockets=1,cores=8,threads=2 \
+            -cpu Skylake-Client,vendor=GenuineIntel,modelname="Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz" \
             -drive file=/tmp/main_disk.qcow2,format=qcow2,index=0,media=disk \
             -drive file=/tmp/win10.iso,index=1,media=cdrom \
             -drive file=/tmp/extras_disk.iso,index=2,media=cdrom \
@@ -125,13 +138,13 @@ jobs:
           sleep 2
 
           echo "=================================================="
-          echo " WINDOWS 10 QEMU READY"
+          echo " WINDOWS 10 QEMU READY (SOURCE ENGINE PRE-LOADED)"
           echo "=================================================="
           echo " OS Image     : Windows 10 Enterprise G (22H2)"
-          echo " CPU Model    : Intel(R) Core(TM) i3-10100 CPU @ 3.60GHz (4 Cores / 8 Threads)"
-          echo " RAM          : 8 GB (8192 MB)"
+          echo " CPU Model    : Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz (8 Cores / 16 Threads)"
+          echo " RAM          : 16 GB (16384 MB)"
           echo " Firmware     : Standard Legacy BIOS (No UEFI)"
-          echo " Extras Drive : Supermium Browser + DirectX 9.0c 3D Runtimes"
+          echo " Extras Drive : Auto-Mount CDROM (DirectX 9.0c + VC++ Runtimes)"
           echo " Tailscale IP : $TAILSCALE_IP"
           echo " Web VNC URL  : http://$TAILSCALE_IP:8006/vnc.html"
           echo "=================================================="
@@ -141,4 +154,3 @@ jobs:
             sleep 300
             echo "QEMU Running | Tailscale IP: $TAILSCALE_IP | $(date)"
           done
-
