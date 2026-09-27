@@ -1,0 +1,146 @@
+name: Windows 10 Enterprise G QEMU (16GB RAM, AMD Ryzen 5, DirectX 9 & Source Engine 3D Acceleration)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-windows10-qemu:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Install QEMU, KVM & Storage Tools
+        run: |
+          echo "=== [STEP 1/4] Installing QEMU & KVM Tools ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 \
+            qemu-utils \
+            novnc \
+            websockify \
+            curl \
+            wget \
+            aria2 \
+            genisoimage \
+            p7zip-full
+
+          echo "=== Enabling KVM Permissions ==="
+          sudo chmod 666 /dev/kvm || true
+
+          echo "=== Creating Main Virtual Disk (128GB qcow2) ==="
+          qemu-img create -f qcow2 /tmp/main_disk.qcow2 128G
+
+      - name: 2. Download Windows ISO, VirtIO & Prepare DirectX / 3D Acceleration Suite
+        run: |
+          echo "=== [STEP 2/4] Downloading ISOs & Preparing DirectX + 3D Driver Suite ==="
+          
+          WIN_ISO_URL="https://archive.org/download/en_windows_10_enterprise_g/en_windows_10_enterprise_g_22h2_build_19045.3570.iso"
+          VIRTIO_URL="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.240-1/virtio-win.iso"
+          
+          echo "Downloading Windows 10 ISO..."
+          aria2c -x 16 -s 16 -k 1M -d /tmp -o win10.iso "$WIN_ISO_URL" || wget -O /tmp/win10.iso "$WIN_ISO_URL"
+          
+          echo "Downloading VirtIO Driver Suite ISO..."
+          aria2c -x 8 -s 8 -k 1M -d /tmp -o virtio-win.iso "$VIRTIO_URL" || wget -O /tmp/virtio-win.iso "$VIRTIO_URL"
+
+          # Создание папки с компонентами DirectX и 3D-ускорения
+          mkdir -p /tmp/directx_3d_extras
+          
+          echo "Downloading DirectX End-User Runtimes (June 2010 - FULL package for Source Engine)..."
+          wget -O /tmp/directx_3d_extras/directx_redist.exe "https://download.microsoft.com/download/1/7/1/171017D0-F9B0-4653-A814-2ED9E1110270/directx_Jun2010_redist.exe" || true
+
+          # Скрипт автоматической распаковки и установки DirectX 9.0c внутри Windows
+          cat << 'EOF' > /tmp/directx_3d_extras/install_directx.bat
+          @echo off
+          echo Installing Full DirectX End-User Runtimes (Legacy DX9 for Source Engine)...
+          mkdir "%TEMP%\directx_extracted"
+          "%~dp0directx_redist.exe" /Q /T:"%TEMP%\directx_extracted"
+          call "%TEMP%\directx_extracted\DXSETUP.exe" /silent
+          echo DirectX Installation Completed!
+          pause
+          EOF
+
+          echo "Packaging DirectX & 3D Acceleration Extras into directx_3d_setup.iso..."
+          genisoimage -V "DX9_3D_ACCEL" -J -R -o /tmp/directx_3d_setup.iso /tmp/directx_3d_extras
+
+          ls -lh /tmp/win10.iso /tmp/virtio-win.iso /tmp/directx_3d_setup.iso
+
+      - name: 3. Connect Tailscale
+        run: |
+          echo "=== [STEP 3/4] Connecting Tailscale ==="
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          sudo tailscale up \
+            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
+            --hostname="win10-qemu-runner-${{ github.run_id }}" \
+            --accept-routes || true
+          
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+              TS_IP=$(tailscale ip -4 || true)
+              sleep 3
+              RETRIES=$((RETRIES+1))
+          done
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: 4. Launch QEMU Windows 10 & noVNC Web Access
+        run: |
+          echo "=== [STEP 4/4] Starting QEMU Windows 10 Machine ==="
+          
+          # Запуск QEMU c поддержкой 3D/GL emulation (std/cirrus) и подключенным ISO с DirectX 9:
+          # CDROM 1: Windows 10 ISO
+          # CDROM 2: VirtIO Drivers (Hardware/Network/Storage)
+          # CDROM 3: DirectX 9.0c & 3D Runtimes ISO
+          qemu-system-x86_64 \
+            -enable-kvm \
+            -m 16384 \
+            -smp 4,sockets=1,cores=4,threads=1 \
+            -cpu EPYC,vendor=AuthenticAMD,modelname="AMD Ryzen 5 5500U with Radeon Graphics" \
+            -drive file=/tmp/main_disk.qcow2,format=qcow2,index=0,media=disk,if=virtio \
+            -drive file=/tmp/win10.iso,index=1,media=cdrom \
+            -drive file=/tmp/virtio-win.iso,index=2,media=cdrom \
+            -drive file=/tmp/directx_3d_setup.iso,index=3,media=cdrom \
+            -vga std \
+            -boot d \
+            -vnc 127.0.0.1:0 \
+            -net nic,model=virtio \
+            -net user \
+            -usb -device usb-tablet \
+            -device virtio-balloon-pci \
+            -device virtio-serial-pci \
+            -daemonize
+
+          sleep 5
+
+          # Настройка noVNC
+          NOVNC_DIR="/usr/share/novnc"
+          if [ -d "/usr/share/novnc/vnc_lite.html" ] || [ -f "/usr/share/novnc/vnc.html" ] || [ -f "/usr/share/novnc/index.html" ]; then
+            NOVNC_DIR="/usr/share/novnc"
+          elif [ -d "/usr/share/novnc" ]; then
+            NOVNC_DIR="/usr/share/novnc"
+          fi
+
+          websockify --web "$NOVNC_DIR" 8006 127.0.0.1:5900 &
+          sleep 2
+
+          echo "=================================================="
+          echo " WINDOWS 10 ENTERPRISE G READY"
+          echo "=================================================="
+          echo " OS Image        : Windows 10 Enterprise G (22H2)"
+          echo " CPU Model       : AMD Ryzen 5 5500U (4 Cores / Office Laptop)"
+          echo " RAM             : 16 GB (16384 MB)"
+          echo " Storage Size    : 128 GB Main Disk"
+          echo " Hardware Drivers: VirtIO ISO (Storage, Net, Serial, Balloon)"
+          echo " 3D/DX Package   : directx_3d_setup.iso (Legacy DirectX 9.0c Full Redist)"
+          echo " Tailscale IP    : $TAILSCALE_IP"
+          echo " Web VNC URL     : http://$TAILSCALE_IP:8006/vnc.html"
+          echo "=================================================="
+
+          # Удерживаем раннер 6 часов
+          END_TIME=$(( $(date +%s) + 21600 ))
+          while [ $(date +%s) -lt $END_TIME ]; do
+            sleep 300
+            echo "QEMU Running | Tailscale IP: $TAILSCALE_IP | $(date)"
+          done
