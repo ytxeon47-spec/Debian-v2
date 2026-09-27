@@ -1,0 +1,144 @@
+name: Custom Windows 10 QEMU (Intel Core i3-10100, SeaBIOS, DirectX 3D & Supermium)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-win10-supermium:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Install QEMU, KVM & Storage Tools
+        run: |
+          echo "=== [STEP 1/5] Installing QEMU, KVM & Storage Tools ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 \
+            qemu-utils \
+            novnc \
+            websockify \
+            curl \
+            wget \
+            aria2 \
+            dosfstools \
+            mtools \
+            genisoimage
+
+          echo "=== Enabling KVM Permissions ==="
+          sudo chmod 666 /dev/kvm || true
+
+          echo "=== Creating Main Virtual Disk (500GB qcow2) ==="
+          qemu-img create -f qcow2 /tmp/main_disk.qcow2 500G
+
+      - name: 2. Download Windows 10 ISO
+        run: |
+          echo "=== [STEP 2/5] Downloading Windows 10 ISO ==="
+          
+          ISO_URL="https://archive.org/download/en_windows_10_enterprise_g/en_windows_10_enterprise_g_22h2_build_19045.3570.iso"
+          
+          echo "Downloading ISO to /tmp/win10.iso..."
+          aria2c -x 16 -s 16 -k 1M -d /tmp -o win10.iso "$ISO_URL" || wget -O /tmp/win10.iso "$ISO_URL"
+          
+          ls -lh /tmp/win10.iso
+
+      - name: 3. Download DirectX 9 3D Runtimes, Supermium & Create Extras Disk
+        run: |
+          echo "=== [STEP 3/5] Downloading DirectX 3D Runtimes & Supermium ==="
+          
+          mkdir -p /tmp/win_extras
+          
+          SUPERMIUM_URL="https://github.com/win32ss/supermium/releases/download/v122/supermium_122_64_setup.exe"
+          DIRECTX_URL="https://archive.org/download/directx_20106/directx_Jun2010_redist.exe"
+          
+          echo "Downloading Supermium installer..."
+          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o supermium_setup.exe "$SUPERMIUM_URL" || wget -O /tmp/win_extras/supermium_setup.exe "$SUPERMIUM_URL"
+          
+          echo "Downloading DirectX 9.0c Full Redistributable (3D Acceleration)..."
+          aria2c -x 16 -s 16 -k 1M -d /tmp/win_extras -o directx_redist.exe "$DIRECTX_URL" || wget -O /tmp/win_extras/directx_redist.exe "$DIRECTX_URL"
+
+          cat << 'EOF' > /tmp/win_extras/install_extras.bat
+          @echo off
+          echo Installing DirectX 9.0c 3D Runtimes...
+          mkdir "%TEMP%\dx_extract"
+          "%~dp0directx_redist.exe" /Q /T:"%TEMP%\dx_extract"
+          call "%TEMP%\dx_extract\DXSETUP.exe" /silent
+          echo DirectX 3D Installation Completed!
+          EOF
+
+          echo "Creating ISO image for extra drivers & tools..."
+          genisoimage -V "WIN_EXTRAS" -J -R -o /tmp/extras_disk.iso /tmp/win_extras
+
+          ls -lh /tmp/extras_disk.iso
+
+      - name: 4. Connect Tailscale
+        run: |
+          echo "=== [STEP 4/5] Connecting Tailscale ==="
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          sudo tailscale up \
+            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
+            --hostname="win10-qemu-runner-${{ github.run_id }}" \
+            --accept-routes || true
+          
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+              TS_IP=$(tailscale ip -4 || true)
+              sleep 3
+              RETRIES=$((RETRIES+1))
+          done
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: 5. Launch QEMU Windows 10 & noVNC Web Access
+        run: |
+          echo "=== [STEP 5/5] Starting QEMU Windows 10 Machine ==="
+          
+          # Запуск QEMU: Intel Core i3-10100 (4 ядра / 8 потоков), Legacy BIOS (без OVMF), 8 GB RAM
+          qemu-system-x86_64 \
+            -enable-kvm \
+            -m 8192 \
+            -smp 8,sockets=1,cores=4,threads=2 \
+            -cpu Skylake-Client,vendor=GenuineIntel,modelname="Intel(R) Core(TM) i3-10100 CPU @ 3.60GHz" \
+            -drive file=/tmp/main_disk.qcow2,format=qcow2,index=0,media=disk \
+            -drive file=/tmp/win10.iso,index=1,media=cdrom \
+            -drive file=/tmp/extras_disk.iso,index=2,media=cdrom \
+            -vga std \
+            -boot d \
+            -vnc 127.0.0.1:0 \
+            -net nic,model=e1000 \
+            -net user \
+            -usb -device usb-tablet \
+            -daemonize
+
+          sleep 5
+
+          NOVNC_DIR="/usr/share/novnc"
+          if [ -d "/usr/share/novnc/vnc_lite.html" ] || [ -f "/usr/share/novnc/vnc.html" ] || [ -f "/usr/share/novnc/index.html" ]; then
+            NOVNC_DIR="/usr/share/novnc"
+          elif [ -d "/usr/share/novnc" ]; then
+            NOVNC_DIR="/usr/share/novnc"
+          fi
+
+          websockify --web "$NOVNC_DIR" 8006 127.0.0.1:5900 &
+          sleep 2
+
+          echo "=================================================="
+          echo " WINDOWS 10 QEMU READY"
+          echo "=================================================="
+          echo " OS Image     : Windows 10 Enterprise G (22H2)"
+          echo " CPU Model    : Intel(R) Core(TM) i3-10100 CPU @ 3.60GHz (4 Cores / 8 Threads)"
+          echo " RAM          : 8 GB (8192 MB)"
+          echo " Firmware     : Standard Legacy BIOS (No UEFI)"
+          echo " Extras Drive : Supermium Browser + DirectX 9.0c 3D Runtimes"
+          echo " Tailscale IP : $TAILSCALE_IP"
+          echo " Web VNC URL  : http://$TAILSCALE_IP:8006/vnc.html"
+          echo "=================================================="
+
+          END_TIME=$(( $(date +%s) + 21600 ))
+          while [ $(date +%s) -lt $END_TIME ]; do
+            sleep 300
+            echo "QEMU Running | Tailscale IP: $TAILSCALE_IP | $(date)"
+          done
+
